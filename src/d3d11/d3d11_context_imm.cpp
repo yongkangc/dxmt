@@ -133,31 +133,6 @@ public:
     return dynamic->immediateMappedMemory();
   }
 
-  void
-  InvalidateDynamicResourceBindings(ID3D11Resource *pResource, UINT bind_flags) {
-    auto resource = GetResourceCommon(pResource);
-    if (bind_flags & D3D11_BIND_VERTEX_BUFFER) {
-      for (auto [slot, binding] : state_.InputAssembler.VertexBuffers) {
-        if (binding.Buffer.ptr() == resource)
-          state_.InputAssembler.VertexBuffers.set_dirty(slot);
-      }
-    }
-    for (auto &stage : state_.ShaderStages) {
-      if (bind_flags & D3D11_BIND_CONSTANT_BUFFER) {
-        for (auto [slot, binding] : stage.ConstantBuffers) {
-          if (binding.Buffer.ptr() == resource)
-            stage.ConstantBuffers.set_dirty(slot);
-        }
-      }
-      if (bind_flags & D3D11_BIND_SHADER_RESOURCE) {
-        for (auto [slot, binding] : stage.SRVs) {
-          if (binding.SRV->resource_.ptr() == resource)
-            stage.SRVs.set_dirty(slot);
-        }
-      }
-    }
-  }
-
   HRESULT
   STDMETHODCALLTYPE
   Map(ID3D11Resource *pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags,

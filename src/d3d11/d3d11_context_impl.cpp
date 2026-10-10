@@ -3285,6 +3285,31 @@ public:
   std::pair<BufferAllocation *, uint32_t>
   GetDynamicBufferAllocation(Rc<DynamicBuffer> &dynamic);
 
+  void
+  InvalidateDynamicResourceBindings(ID3D11Resource *pResource, UINT bind_flags) {
+    auto resource = GetResourceCommon(pResource);
+    if (bind_flags & D3D11_BIND_VERTEX_BUFFER) {
+      for (auto [slot, binding] : state_.InputAssembler.VertexBuffers) {
+        if (binding.Buffer.ptr() == resource)
+          state_.InputAssembler.VertexBuffers.set_dirty(slot);
+      }
+    }
+    for (auto &stage : state_.ShaderStages) {
+      if (bind_flags & D3D11_BIND_CONSTANT_BUFFER) {
+        for (auto [slot, binding] : stage.ConstantBuffers) {
+          if (binding.Buffer.ptr() == resource)
+            stage.ConstantBuffers.set_dirty(slot);
+        }
+      }
+      if (bind_flags & D3D11_BIND_SHADER_RESOURCE) {
+        for (auto [slot, binding] : stage.SRVs) {
+          if (binding.SRV->resource_.ptr() == resource)
+            stage.SRVs.set_dirty(slot);
+        }
+      }
+    }
+  }
+
   uint64_t *allocated_encoder_argbuf_size_ = nullptr;
 
   uint64_t PreAllocateArgumentBuffer(size_t size, size_t alignment) {
@@ -3332,7 +3357,7 @@ public:
       });
       ShaderStage.Samplers.clear_dirty();
       ShaderStage.SRVs.clear_dirty();
-      if (stage == PipelineStage::Pixel || stage == PipelineStage::Compute) {
+      if (stage == PipelineStage::Compute) {
         UAVBindingSet.clear_dirty();
       }
     }
@@ -4628,6 +4653,29 @@ public:
   };
 
   template <bool IndexedDraw>
+  SM50_INDEX_BUFFER_FORMAT
+  GetDrawIndexBufferFormat() {
+    if constexpr (IndexedDraw)
+      return state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT
+                 ? SM50_INDEX_BUFFER_FORMAT_UINT32
+                 : SM50_INDEX_BUFFER_FORMAT_UINT16;
+    return SM50_INDEX_BUFFER_FORMAT_NONE;
+  }
+
+  template <bool IndexedDraw>
+  void
+  UpdateRenderPipelineIndexFormat() {
+    auto format = GetDrawIndexBufferFormat<IndexedDraw>();
+    if (render_pipeline_index_format == format)
+      return;
+    render_pipeline_index_format = format;
+    // Mesh-emulated geometry/tessellation shaders specialize their index loads.
+    if (cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady ||
+        cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady)
+      InvalidateRenderPipeline();
+  }
+
+  template <bool IndexedDraw>
   void
   InitializeGraphicsPipelineDesc(MTL_GRAPHICS_PIPELINE_DESC &Desc) {
     // TODO: reduce branching
@@ -4678,19 +4726,14 @@ public:
     } else {
       Desc.GSStripTopology = false;
     }
-    if constexpr (IndexedDraw) {
-      Desc.IndexBufferFormat = state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT
-                                   ? SM50_INDEX_BUFFER_FORMAT_UINT32
-                                   : SM50_INDEX_BUFFER_FORMAT_UINT16;
-    } else {
-      Desc.IndexBufferFormat = SM50_INDEX_BUFFER_FORMAT_NONE;
-    }
+    Desc.IndexBufferFormat = GetDrawIndexBufferFormat<IndexedDraw>();
     Desc.SampleCount = state_.OutputMerger.SampleCount;
   }
 
   template <bool IndexedDraw>
   DrawCallStatus
   FinalizeTessellationRenderPipeline() {
+    UpdateRenderPipelineIndexFormat<IndexedDraw>();
     if (cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady)
       return DrawCallStatus::Tessellation;
     auto HS = GetManagedShader<PipelineStage::Hull>();
@@ -4772,6 +4815,7 @@ public:
   template <bool IndexedDraw>
   DrawCallStatus
   FinalizeGeometryRenderPipeline() {
+    UpdateRenderPipelineIndexFormat<IndexedDraw>();
     if (cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady)
       return DrawCallStatus::Geometry;
     if (!SwitchToRenderEncoder()) {
@@ -4973,6 +5017,8 @@ public:
       UploadShaderStageResourceBinding<PipelineStage::Vertex, PipelineKind::Ordinary>();
       UploadShaderStageResourceBinding<PipelineStage::Pixel, PipelineKind::Ordinary>();
     }
+    // All active graphics stages must observe OM UAV changes before clearing.
+    state_.OutputMerger.UAVs.clear_dirty();
     return status;
   }
 
@@ -5139,6 +5185,7 @@ protected:
   MTLD3D11Device *device;
   CommandBufferState cmdbuf_state = CommandBufferState::Idle;
   CommandBufferState previous_render_pipeline_state = CommandBufferState::Idle;
+  SM50_INDEX_BUFFER_FORMAT render_pipeline_index_format = SM50_INDEX_BUFFER_FORMAT_NONE;
   ContextInternalState &ctx_state;
   ContextInternalState::device_mutex_t &mutex;
 
