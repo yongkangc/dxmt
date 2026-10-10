@@ -136,8 +136,8 @@ public:
       }
     } else {
       bound.set(slot, true);
-      this->hazard.set(slot, hazard);
     }
+    this->hazard.set(slot, hazard);
     // new (storage.data() + slot) Element(std::forward<Element>(element));
     // std::construct_at(storage.data() + slot, std::forward<Element>(element));
     // idk why placement construction kills performance

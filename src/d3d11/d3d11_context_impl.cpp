@@ -1926,11 +1926,10 @@ public:
   IASetInputLayout(ID3D11InputLayout *pInputLayout) override {
     std::lock_guard<mutex_t> lock(mutex);
 
-    if (auto expected = com_cast<IMTLD3D11InputLayout>(pInputLayout)) {
-      state_.InputAssembler.InputLayout = std::move(expected);
-    } else {
-      state_.InputAssembler.InputLayout = nullptr;
-    }
+    auto expected = com_cast<IMTLD3D11InputLayout>(pInputLayout);
+    if (state_.InputAssembler.InputLayout.ptr() == expected.ptr())
+      return;
+    state_.InputAssembler.InputLayout = std::move(expected);
     InvalidateRenderPipeline();
   }
   void
@@ -3311,8 +3310,9 @@ public:
     bool dirty_cbuffer = ShaderStage.ConstantBuffers.any_dirty_masked(reflection->ConstantBufferSlotMask);
     bool dirty_sampler = ShaderStage.Samplers.any_dirty_masked(reflection->SamplerSlotMask);
     bool dirty_srv = ShaderStage.SRVs.any_dirty_masked(reflection->SRVSlotMaskHi, reflection->SRVSlotMaskLo);
+    bool dirty_uav = UAVBindingSet.any_dirty_masked(reflection->UAVSlotMask);
     bool uav_bound = UAVBindingSet.any_bound_masked(reflection->UAVSlotMask);
-    if (!dirty_cbuffer && !dirty_sampler && !dirty_srv && !uav_bound)
+    if (!dirty_cbuffer && !dirty_sampler && !dirty_srv && !dirty_uav && !uav_bound)
       return;
 
     if (reflection->NumConstantBuffers && dirty_cbuffer) {
@@ -3324,7 +3324,7 @@ public:
       ShaderStage.ConstantBuffers.clear_dirty();
     }
 
-    if (reflection->NumArguments && (dirty_sampler || dirty_srv || uav_bound)) {
+    if (reflection->NumArguments && (dirty_sampler || dirty_srv || dirty_uav || uav_bound)) {
       auto ArgumentTableQwords = reflection->ArgumentTableQwords;
       auto offset = PreAllocateArgumentBuffer(ArgumentTableQwords << 3, 32);
       EmitST([=, arg = managed_shader->arguments_info()](ArgumentEncodingContext &enc) {
@@ -3469,30 +3469,26 @@ public:
       if (pConstantBuffer) {
         bool replaced = false;
         auto &entry = ShaderStage.ConstantBuffers.bind(slot, {pConstantBuffer}, replaced);
+        auto first_constant = pFirstConstant ? pFirstConstant[slot - StartSlot] : 0;
+        auto num_constants = pNumConstants ? pNumConstants[slot - StartSlot]
+                                          : UINT(GetResourceCommon(pConstantBuffer)->buffer()->length() >> 4);
         if (!replaced) {
-          if (pFirstConstant &&
-              pFirstConstant[slot - StartSlot] != entry.FirstConstant) {
+          if (first_constant != entry.FirstConstant) {
             ShaderStage.ConstantBuffers.set_dirty(slot);
-            entry.FirstConstant = pFirstConstant[slot - StartSlot];
+            entry.FirstConstant = first_constant;
             EmitST([=, offset = entry.FirstConstant
                                 << 4](ArgumentEncodingContext &enc) mutable {
               enc.bindConstantBufferOffset<Stage>(slot, offset);
             });
           }
-          if (pNumConstants && pNumConstants[slot - StartSlot] != entry.NumConstants) {
+          if (num_constants != entry.NumConstants) {
             ShaderStage.ConstantBuffers.set_dirty(slot);
-            entry.NumConstants = pNumConstants[slot - StartSlot];
+            entry.NumConstants = num_constants;
           }
           continue;
         }
-        entry.FirstConstant = pFirstConstant ? pFirstConstant[slot - StartSlot] : 0;
-        if (pNumConstants) {
-          entry.NumConstants = pNumConstants[slot - StartSlot];
-        } else {
-          D3D11_BUFFER_DESC desc;
-          pConstantBuffer->GetDesc(&desc);
-          entry.NumConstants = desc.ByteWidth >> 4;
-        }
+        entry.FirstConstant = first_constant;
+        entry.NumConstants = num_constants;
         entry.Buffer = GetResourceCommon(pConstantBuffer);
         EmitST([=, buffer = entry.Buffer->buffer(), offset = entry.FirstConstant << 4](ArgumentEncodingContext &enc
              ) mutable { enc.bindConstantBuffer<Stage>(slot, offset, forward_rc(buffer)); });
@@ -3530,6 +3526,10 @@ public:
         if (ppConstantBuffers) {
           ppConstantBuffers[i] = nullptr;
         }
+        if (pFirstConstant)
+          pFirstConstant[i] = 0;
+        if (pNumConstants)
+          pNumConstants[i] = 0;
       }
     }
   }
@@ -3742,14 +3742,19 @@ public:
         bool replaced = false;
         auto &entry = VertexBuffers.bind(slot, {pVertexBuffer}, replaced, !pVertexBuffer->hazardsFree());
         if (!replaced) {
+          bool changed = false;
           if (pStrides && pStrides[slot - StartSlot] != entry.Stride) {
             VertexBuffers.set_dirty(slot);
             entry.Stride = pStrides[slot - StartSlot];
+            changed = true;
           }
           if (pOffsets && pOffsets[slot - StartSlot] != entry.Offset) {
             VertexBuffers.set_dirty(slot);
             entry.Offset = pOffsets[slot - StartSlot];
+            changed = true;
           }
+          if (!changed)
+            continue;
           EmitST([=, offset = entry.Offset,
                 stride = entry.Stride](ArgumentEncodingContext &enc) mutable {
             enc.bindVertexBufferOffset(slot, offset, stride);
