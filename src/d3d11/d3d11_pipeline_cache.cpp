@@ -381,11 +381,15 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
                            MTLCompiledGraphicsPipeline **ppPipeline) override {
     std::lock_guard<dxmt::mutex> lock(mutex_);
 
-    if (auto iter = pipelines_.find(*pDesc); iter != pipelines_.end()) {
+    // Ordinary vertex/fragment pipelines do not specialize on the index format.
+    // Geometry and tessellation pipelines keep their original descriptors.
+    auto desc = *pDesc;
+    desc.IndexBufferFormat = SM50_INDEX_BUFFER_FORMAT_NONE;
+    if (auto iter = pipelines_.find(desc); iter != pipelines_.end()) {
       *ppPipeline = iter->second.get();
       return;
     }
-    auto [iter, inserted] = pipelines_.insert({*pDesc, CreateGraphicsPipeline(device, pDesc)});
+    auto [iter, inserted] = pipelines_.insert({desc, CreateGraphicsPipeline(device, &desc)});
     if (!inserted) {
       D3D11_ASSERT(0 && "duplicated graphics pipeline");
     } else {

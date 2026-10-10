@@ -56,7 +56,11 @@ template <typename Task> task_scheduler<Task>::task_scheduler() {
 }
 
 template <typename Task> task_scheduler<Task>::~task_scheduler() {
-  destroyed.store(true);
+  {
+    // Serialize with the wait predicate so shutdown cannot lose its wakeup.
+    std::unique_lock<dxmt::mutex> lock(worker_mutex_);
+    destroyed.store(true);
+  }
   worker_cond_.notify_all();
 
   for (auto &worker : workers_) {
@@ -107,14 +111,19 @@ task_scheduler<Task>::worker_func() {
           task_continuation_.erase(range.first, range.second);
           task_trait.set_done(continuation);
         }
-        {
-          std::unique_lock<dxmt::mutex> lock(worker_mutex_);
-          for (auto &task : continuation_buffer) {
-            task_continuation_queue_.push(task);
+        if (!continuation_buffer.empty()) {
+          {
+            std::unique_lock<dxmt::mutex> lock(worker_mutex_);
+            for (auto &task : continuation_buffer) {
+              task_continuation_queue_.push(task);
+            }
           }
+          if (continuation_buffer.size() == 1)
+            worker_cond_.notify_one();
+          else
+            worker_cond_.notify_all();
+          continuation_buffer.clear();
         }
-        worker_cond_.notify_all();
-        continuation_buffer.clear();
       } else {
         std::unique_lock<dxmt::mutex> lock(deps_mutex_);
         // spurious dependency

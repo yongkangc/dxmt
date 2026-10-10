@@ -133,6 +133,31 @@ public:
     return dynamic->immediateMappedMemory();
   }
 
+  void
+  InvalidateDynamicResourceBindings(ID3D11Resource *pResource, UINT bind_flags) {
+    auto resource = GetResourceCommon(pResource);
+    if (bind_flags & D3D11_BIND_VERTEX_BUFFER) {
+      for (auto [slot, binding] : state_.InputAssembler.VertexBuffers) {
+        if (binding.Buffer.ptr() == resource)
+          state_.InputAssembler.VertexBuffers.set_dirty(slot);
+      }
+    }
+    for (auto &stage : state_.ShaderStages) {
+      if (bind_flags & D3D11_BIND_CONSTANT_BUFFER) {
+        for (auto [slot, binding] : stage.ConstantBuffers) {
+          if (binding.Buffer.ptr() == resource)
+            stage.ConstantBuffers.set_dirty(slot);
+        }
+      }
+      if (bind_flags & D3D11_BIND_SHADER_RESOURCE) {
+        for (auto [slot, binding] : stage.SRVs) {
+          if (binding.SRV->resource_.ptr() == resource)
+            stage.SRVs.set_dirty(slot);
+        }
+      }
+    }
+  }
+
   HRESULT
   STDMETHODCALLTYPE
   Map(ID3D11Resource *pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags,
@@ -152,19 +177,7 @@ public:
       case D3D11_MAP_READ_WRITE:
         return E_INVALIDARG;
       case D3D11_MAP_WRITE_DISCARD: {
-        if (bind_flag & D3D11_BIND_VERTEX_BUFFER) {
-          state_.InputAssembler.VertexBuffers.set_dirty();
-        }
-        if (bind_flag & D3D11_BIND_CONSTANT_BUFFER) {
-          for (auto &stage : state_.ShaderStages) {
-            stage.ConstantBuffers.set_dirty();
-          }
-        }
-        if (bind_flag & D3D11_BIND_SHADER_RESOURCE) {
-          for (auto &stage : state_.ShaderStages) {
-            stage.SRVs.set_dirty();
-          }
-        }
+        InvalidateDynamicResourceBindings(pResource, bind_flag);
 
         pMappedResource->pData = MapDynamicBuffer(dynamic, current_seq_id, coherent_seq_id);
         pMappedResource->RowPitch = buffer_length;
@@ -188,9 +201,7 @@ public:
       case D3D11_MAP_WRITE_NO_OVERWRITE:
         return E_INVALIDARG;
       case D3D11_MAP_WRITE_DISCARD: {
-        for (auto &stage : state_.ShaderStages) {
-          stage.SRVs.set_dirty();
-        }
+        InvalidateDynamicResourceBindings(pResource, D3D11_BIND_SHADER_RESOURCE);
 
         pMappedResource->pData = MapDynamicBuffer(dynamic, current_seq_id, coherent_seq_id);
         pMappedResource->RowPitch = row_pitch;
@@ -207,9 +218,7 @@ public:
       case D3D11_MAP_READ_WRITE:
         return E_INVALIDARG;
       case D3D11_MAP_WRITE_DISCARD: {
-        for (auto &stage : state_.ShaderStages) {
-          stage.SRVs.set_dirty();
-        }
+        InvalidateDynamicResourceBindings(pResource, D3D11_BIND_SHADER_RESOURCE);
 
         dynamic->updateImmediateName(current_seq_id, dynamic->allocate(coherent_seq_id), false);
         EmitST([allocation = dynamic->immediateName(),
